@@ -463,57 +463,6 @@ func (pc *PFCPConn) handleSessionDeletionRequest(upf *upf, msg message.Message, 
 	return smres
 }
 
-func (pc *PFCPConn) manageSmfConnection(n4LocalIP string, n3ip string, n4Dst string, conn *net.UDPConn, cpConnectionStatus chan bool) {
-	cpConnected := false
-
-	initiatePfcpConnection := func() {
-		log.Println("SPGWC/SMF hostname ", n4Dst)
-		n4DstIP := getRemoteIP(n4Dst)
-		log.Println("SPGWC/SMF address IP inside manageSmfConnection ", n4DstIP.String())
-		// initiate request if we have control plane address available
-		if n4DstIP.String() != "0.0.0.0" {
-			pc.generateAssociationRequest(n4LocalIP, n3ip, n4DstIP.String(), conn)
-		}
-		// no worry. Looks like control plane is still not up
-	}
-	updateSmfStatus := func(msg bool) {
-		log.Println("cpConnected : ", cpConnected, "msg ", msg)
-		// events from main Loop
-		if cpConnected && !msg {
-			log.Println("CP disconnected ")
-			cpConnected = false
-		} else if !cpConnected && msg {
-			log.Println("CP Connected ")
-			cpConnected = true
-		} else {
-			log.Println("cpConnected ", cpConnected, "msg - ", msg)
-		}
-	}
-
-	initiatePfcpConnection()
-
-	connHelathTicker := time.NewTicker(5000 * time.Millisecond)
-	pfcpResponseTicker := time.NewTicker(2000 * time.Millisecond)
-	for {
-		select {
-		case msg := <-cpConnectionStatus:
-			// events from main Loop
-			updateSmfStatus(msg)
-			if cpConnected {
-				pfcpResponseTicker.Stop()
-			}
-		case <-connHelathTicker.C:
-			if !cpConnected {
-				log.Println("Retry pfcp connection setup ", n4Dst)
-				initiatePfcpConnection()
-			}
-		case <-pfcpResponseTicker.C:
-			log.Println("PFCP session setup timeout ")
-			pfcpResponseTicker.Stop()
-			// we will attempt new connection after next recheck
-		}
-	}
-}
 
 func (pc *PFCPConn) generateAssociationRequest(n4LocalIP string, n3ip string, n4DstIP string, conn *net.UDPConn) {
 	seq := pc.getSeqNum()

@@ -41,14 +41,16 @@ func (c *PFCPConn) getSeqNum() uint32 {
 }
 
 type rcvdPacket struct {
-	Buf      [1500]byte
-	Pkt_size int
-	Address  net.Addr
+	Buf        [1500]byte
+	Pkt_size   int
+	Address    net.Addr
+	SrcAddress string
 }
 
 type parsedPacket struct {
-	Msg     *message.Message
-	Address net.Addr
+	Msg        *message.Message
+	Address    net.Addr
+	SrcAddress string
 }
 
 func pfcpifaceMainLoop(upf *upf, accessIP, coreIP, sourceIP, smfName string) {
@@ -66,146 +68,172 @@ func pfcpifaceMainLoop(upf *upf, accessIP, coreIP, sourceIP, smfName string) {
 		return
 	}
 
+
+	pfcpRcvdPktsChan := make(chan *rcvdPacket, 1000)
+	pfcpParsedPktsChan := make(chan *parsedPacket, 1000)
+
+
 	// Listen on the port
 	conn, err := net.ListenUDP("udp", laddr)
 	if err != nil {
 		log.Fatalln("Unable to bind to listening port!", err)
 		return
 	}
+	go pconn.manageSmfConnection(upf, sourceIP, accessIP, smfName, conn, cpConnectionStatus)
+	go pfcpPacketParsing(pfcpRcvdPktsChan, pfcpParsedPktsChan)
+	go pfcpPacketProcessing(upf, conn, pfcpParsedPktsChan, cpConnectionStatus, accessIP, coreIP, &pconn)
 
-	// flag to check SMF/SPGW-C is connected
-	// cpConnected is true if upf received request from control plane or
-	// if upf receives +ve response for upf initiated setup request
-	cpConnected := false
-
-	// cleanup the pipeline
-	cleanupSessions := func() {
-		if cpConnected {
-			sendDeleteAllSessionsMsgtoUPF(upf)
-			cpConnected = false
-		}
-	}
-	// initiate connection if smf address available
-	log.Println("calling manageSmfConnection smf service name ", smfName)
-	manageConnection := false
-	if smfName != "" {
-		manageConnection = true
-		go pconn.manageSmfConnection(sourceIP, accessIP, smfName, conn, cpConnectionStatus)
-	}
-
-	pfcpRcvdPktsChan := make(chan *rcvdPacket, 1000)
-	pfcpParsedPktsChan := make(chan *parsedPacket, 1000)
-	// Initialize pkt header
-
-	pfcpPacketReader := func(pfcpRcvdPkts chan *rcvdPacket) {
-		for {
-			err := conn.SetReadDeadline(time.Now().Add(readTimeout))
-			if err != nil {
-				log.Fatalln("Unable to set deadline for read:", err)
-			}
-			pkt := new(rcvdPacket)
-			// blocking read
-			n, addr, err := conn.ReadFrom(pkt.Buf[:1500])
-			if err != nil {
-				if err, ok := err.(net.Error); ok && err.Timeout() {
-					// do nothing for the time being
-					log.Println(err)
-					cpConnected = false
-					if manageConnection {
-						cpConnectionStatus <- cpConnected
-					}
-					cleanupSessions()
-					continue
-				}
-				log.Fatalln("Read error:", err)
-			}
-			pkt.Pkt_size = n
-			pkt.Address = addr
-			pfcpRcvdPktsChan <- pkt
-		}
-	}
-
-	pfcpPacketParsing := func(pkt *rcvdPacket, pfcpParsedPktsChan chan *parsedPacket) {
-		// use wmnsk lib to parse the pfcp message
-		msg, err := message.Parse(pkt.Buf[:pkt.Pkt_size])
+	for {
+		pkt := new(rcvdPacket)
+		// blocking read
+		n, addr, err := conn.ReadFrom(pkt.Buf[:1500])
 		if err != nil {
-			log.Println("Ignoring undecodable message size ", pkt.Pkt_size)
-			log.Println("Ignoring undecodable message: ", pkt.Buf[:pkt.Pkt_size], " error: ", err)
-			return
+			if err, ok := err.(net.Error); ok && err.Timeout() {
+				// do nothing for the time being
+				log.Println(err)
+				cpConnectionStatus <- false
+                continue;
+			}
+			log.Fatalln("Read error:", err)
 		}
+		pkt.Pkt_size = n
+		pkt.Address = addr
 		// if sourceIP is not set, fetch it from the msg header
 		if sourceIP == "0.0.0.0" {
 			addrString := strings.Split(pkt.Address.String(), ":")
 			sourceIP = getLocalIP(addrString[0]).String()
 			log.Println("Source IP address is now: ", sourceIP)
 		}
-		pPkt := new(parsedPacket)
-		pPkt.Msg = &msg
-		pPkt.Address = pkt.Address
-		pfcpParsedPktsChan <- pPkt
+		pkt.SrcAddress = sourceIP
+		pfcpRcvdPktsChan <- pkt
+	}
+}
+
+// cleanup the pipeline
+func cleanupSessions(upf *upf) {
+	sendDeleteAllSessionsMsgtoUPF(upf)
+}
+
+func (pc *PFCPConn) manageSmfConnection(upf *upf, n4LocalIP string, n3ip string, n4Dst string, conn *net.UDPConn, cpConnectionStatus chan bool) {
+	cpConnected := false
+
+	initiatePfcpConnection := func() {
+		log.Println("SPGWC/SMF hostname ", n4Dst)
+		n4DstIP := getRemoteIP(n4Dst)
+		log.Println("SPGWC/SMF address IP inside manageSmfConnection ", n4DstIP.String())
+		// initiate request if we have control plane address available
+		if n4DstIP.String() != "0.0.0.0" {
+			pc.generateAssociationRequest(n4LocalIP, n3ip, n4DstIP.String(), conn)
+		}
+		// no worry. Looks like control plane is still not up
+	}
+	updateSmfStatus := func(msg bool) {
+		log.Println("cpConnected : ", cpConnected, "msg ", msg)
+		// events from main Loop
+		if cpConnected && !msg {
+			log.Println("CP disconnected ")
+			cpConnected = false
+            cleanupSessions(upf)
+		} else if !cpConnected && msg {
+			log.Println("CP Connected ")
+			cpConnected = true
+		} else {
+			log.Println("cpConnected ", cpConnected, "msg - ", msg)
+		}
 	}
 
-	pfcpPacketProcessing := func(pPkt *parsedPacket) {
-		msg := *pPkt.Msg
-		// handle message
-		var outgoingMessage []byte
-		switch msg.MessageType() {
-		case message.MsgTypeAssociationSetupRequest:
-			outgoingMessage = pconn.handleAssociationSetupRequest(msg, pPkt.Address, sourceIP, accessIP, coreIP)
-			if outgoingMessage != nil {
-				cpConnected = true
-				if manageConnection {
-					// if we initiated connection, inform go routine
-					cpConnectionStatus <- cpConnected
-				}
-			}
-		case message.MsgTypeAssociationSetupResponse:
-			cpConnected = handleAssociationSetupResponse(msg, pPkt.Address, sourceIP, accessIP)
-			if manageConnection {
-				// pass on information to go routine that result of association response
-				cpConnectionStatus <- cpConnected
-			}
-		case message.MsgTypePFDManagementRequest:
-			outgoingMessage = pconn.handlePFDMgmtRequest(upf, msg, pPkt.Address, sourceIP)
-		case message.MsgTypeSessionEstablishmentRequest:
-			outgoingMessage = pconn.handleSessionEstablishmentRequest(upf, msg, pPkt.Address, sourceIP)
-		case message.MsgTypeSessionModificationRequest:
-			outgoingMessage = pconn.handleSessionModificationRequest(upf, msg, pPkt.Address, sourceIP)
-		case message.MsgTypeHeartbeatRequest:
-			outgoingMessage = handleHeartbeatRequest(msg, pPkt.Address)
-		case message.MsgTypeSessionDeletionRequest:
-			outgoingMessage = pconn.handleSessionDeletionRequest(upf, msg, pPkt.Address, sourceIP)
-		case message.MsgTypeAssociationReleaseRequest:
-			outgoingMessage = handleAssociationReleaseRequest(msg, pPkt.Address, sourceIP, accessIP)
-			cleanupSessions()
-		default:
-			log.Println("Message type: ", msg.MessageTypeName(), " is currently not supported")
-			return
-		}
+	if n4Dst != "" {
+	    log.Println("initiate pfcp connection to smf - ", n4Dst)
+	    initiatePfcpConnection()
+    }
 
-		// send the response out
-		if outgoingMessage != nil {
-			if _, err := conn.WriteTo(outgoingMessage, pPkt.Address); err != nil {
-				log.Fatalln("Unable to transmit association setup response", err)
-			}
-		}
-
-	}
-
-	go pfcpPacketReader(pfcpRcvdPktsChan)
-
+	connHelathTicker := time.NewTicker(5000 * time.Millisecond)
+	pfcpResponseTicker := time.NewTicker(2000 * time.Millisecond)
 	for {
 		select {
+		case msg := <-cpConnectionStatus:
+			// events from main Loop
+			updateSmfStatus(msg)
+			if cpConnected {
+				pfcpResponseTicker.Stop()
+			}
+		case <-connHelathTicker.C:
+			if !cpConnected {
+				log.Println("Retry pfcp connection setup ", n4Dst)
+				initiatePfcpConnection()
+			}
+		case <-pfcpResponseTicker.C:
+			log.Println("PFCP session setup timeout ")
+			pfcpResponseTicker.Stop()
+			// we will attempt new connection after next recheck
+		}
+	}
+}
 
-		// create goroutine for each packet parsing
-		case rPkt := <-pfcpRcvdPktsChan:
-			go pfcpPacketParsing(rPkt, pfcpParsedPktsChan)
+func pfcpPacketParsing(pfcpRcvdPktsChan chan *rcvdPacket, pfcpParsedPktsChan chan *parsedPacket) {
+	for {
+		select {
+		case pkt := <-pfcpRcvdPktsChan:
+			// use wmnsk lib to parse the pfcp message
+			msg, err := message.Parse(pkt.Buf[:pkt.Pkt_size])
+			if err != nil {
+				log.Println("Ignoring undecodable message size ", pkt.Pkt_size)
+				log.Println("Ignoring undecodable message: ", pkt.Buf[:pkt.Pkt_size], " error: ", err)
+				return
+			}
 
-		// only 1 function to process packet.
-		// assumption is that Parsing is heavy and
-		// packet processing is light
+			pPkt := new(parsedPacket)
+			pPkt.Msg = &msg
+			pPkt.Address = pkt.Address
+			pPkt.SrcAddress = pkt.SrcAddress
+			pfcpParsedPktsChan <- pPkt
+		}
+	}
+}
+
+func pfcpPacketProcessing(upf *upf, conn *net.UDPConn, pfcpParsedPktsChan chan *parsedPacket, cpConnectionStatus chan bool, accessIP, coreIP string, pconn *PFCPConn) {
+	cpConnected := false
+	for {
+		select {
 		case pPkt := <-pfcpParsedPktsChan:
-			pfcpPacketProcessing(pPkt)
+
+			msg := *pPkt.Msg
+			// handle message
+			var outgoingMessage []byte
+			switch msg.MessageType() {
+			case message.MsgTypeAssociationSetupRequest:
+				outgoingMessage = pconn.handleAssociationSetupRequest(msg, pPkt.Address, pPkt.SrcAddress, accessIP, coreIP)
+				if outgoingMessage != nil {
+					// if we initiated connection, inform go routine
+					cpConnectionStatus <- true
+				}
+			case message.MsgTypeAssociationSetupResponse:
+				cpConnected = handleAssociationSetupResponse(msg, pPkt.Address, pPkt.SrcAddress, accessIP)
+				cpConnectionStatus <- cpConnected
+			case message.MsgTypePFDManagementRequest:
+				outgoingMessage = pconn.handlePFDMgmtRequest(upf, msg, pPkt.Address, pPkt.SrcAddress)
+			case message.MsgTypeSessionEstablishmentRequest:
+				outgoingMessage = pconn.handleSessionEstablishmentRequest(upf, msg, pPkt.Address, pPkt.SrcAddress)
+			case message.MsgTypeSessionModificationRequest:
+				outgoingMessage = pconn.handleSessionModificationRequest(upf, msg, pPkt.Address, pPkt.SrcAddress)
+			case message.MsgTypeHeartbeatRequest:
+				outgoingMessage = handleHeartbeatRequest(msg, pPkt.Address)
+			case message.MsgTypeSessionDeletionRequest:
+				outgoingMessage = pconn.handleSessionDeletionRequest(upf, msg, pPkt.Address, pPkt.SrcAddress)
+			case message.MsgTypeAssociationReleaseRequest:
+				outgoingMessage = handleAssociationReleaseRequest(msg, pPkt.Address, pPkt.SrcAddress, accessIP)
+				cleanupSessions(upf)
+			default:
+				log.Println("Message type: ", msg.MessageTypeName(), " is currently not supported")
+				return
+			}
+
+			// send the response out
+			if outgoingMessage != nil {
+				if _, err := conn.WriteTo(outgoingMessage, pPkt.Address); err != nil {
+					log.Fatalln("Unable to transmit association setup response", err)
+				}
+			}
 		}
 	}
 }

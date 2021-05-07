@@ -68,7 +68,7 @@ func (f *far) setActionValue() uint8 {
 	if (f.applyAction & ActionForward) != 0 {
 		if f.dstIntf == ie.DstInterfaceAccess {
 			return farForwardD
-		} else if f.dstIntf == ie.DstInterfaceCore {
+		} else if (f.dstIntf == ie.DstInterfaceCore) || (f.dstIntf == ie.DstInterfaceSGiLANN6LAN) {
 			return farForwardU
 		}
 	} else if (f.applyAction & ActionDrop) != 0 {
@@ -102,7 +102,9 @@ func (f *far) parseFAR(farIE *ie.IE, fseid uint64, upf *upf, op operation) error
 
 	switch op {
 	case create:
-		fwdIEs, err = farIE.ForwardingParameters()
+		if (f.applyAction & ActionForward) != 0 {
+			fwdIEs, err = farIE.ForwardingParameters()
+		}
 	case update:
 		fwdIEs, err = farIE.UpdateForwardingParameters()
 	default:

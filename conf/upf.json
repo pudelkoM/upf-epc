@@ -31,6 +31,9 @@
     "": "Enable hardware offload of checksum. Might disable vector PMD",
     "hwcksum": false,
 
+    "": "Enable PDU Session Container extension",
+    "gtppsc": false,
+
     "": "Enable Intel Dynamic Device Personalization (DDP)",
     "ddp": false,
 
@@ -56,6 +59,8 @@
 
     "": "Whether to enable P4Runtime feature",
     "enable_p4rt": false,
+    "" : "conn_timeout: 1000",
+    "" : "read_timeout: 25",
     
     "": "Control plane controller settings",
     "cpiface": {
@@ -63,8 +68,9 @@
         "ue_ip_pool": "10.250.0.0/16",
         "nb_dst_ip": "172.17.0.1",
         "" : "nb_dst_ip: CPHostname",
-        "hostname": "spgwc",
-        "prom_port": "8080"
+        "" : "hostname: upf",
+        "prom_port": "8080",
+        "" : "dnn:internet"
     },
     
     "": "p4rtc interface settings",

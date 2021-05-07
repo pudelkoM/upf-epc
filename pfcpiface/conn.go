@@ -18,9 +18,11 @@ const (
 	PktBufSz    = 1500
 	PFCPPort    = "8805"
 	MaxItems    = 10
-	Timeout     = 1000 * time.Millisecond
 	readTimeout = 25 * time.Second
 )
+
+//Timeout : connection timeout
+var Timeout = 1000 * time.Millisecond
 
 // PFCPConn represents a PFCP connection
 type PFCPConn struct {
@@ -43,7 +45,15 @@ func (c *PFCPConn) getSeqNum() uint32 {
 func pfcpifaceMainLoop(upf *upf, accessIP, coreIP, sourceIP, smfName string) {
 	var pconn PFCPConn
 	pconn.mgr = NewPFCPSessionMgr(100)
+	rTimeout := readTimeout
+	if upf.readTimeout != 0 {
+		rTimeout = time.Duration(upf.readTimeout)
+	}
+	if upf.connTimeout != 0 {
+		Timeout = upf.connTimeout
+	}
 
+	log.Println("timeout : ", Timeout, ", readTimeout : ", rTimeout)
 	log.Println("pfcpifaceMainLoop@" + upf.fqdnHost + " says hello!!!")
 
 	cpConnectionStatus := make(chan bool)
@@ -80,7 +90,7 @@ func pfcpifaceMainLoop(upf *upf, accessIP, coreIP, sourceIP, smfName string) {
 	manageConnection := false
 	if smfName != "" {
 		manageConnection = true
-		go pconn.manageSmfConnection(sourceIP, accessIP, smfName, conn, cpConnectionStatus, upf.recoveryTime)
+		go pconn.manageSmfConnection(upf.nodeIP.String(), accessIP, smfName, conn, cpConnectionStatus, upf.recoveryTime)
 	}
 
 	// Initialize pkt buf
@@ -88,7 +98,7 @@ func pfcpifaceMainLoop(upf *upf, accessIP, coreIP, sourceIP, smfName string) {
 	// Initialize pkt header
 
 	for {
-		err := conn.SetReadDeadline(time.Now().Add(readTimeout))
+		err := conn.SetReadDeadline(time.Now().Add(rTimeout))
 		if err != nil {
 			log.Fatalln("Unable to set deadline for read:", err)
 		}
@@ -120,6 +130,13 @@ func pfcpifaceMainLoop(upf *upf, accessIP, coreIP, sourceIP, smfName string) {
 			addrString := strings.Split(addr.String(), ":")
 			sourceIP = getLocalIP(addrString[0]).String()
 			log.Println("Source IP address is now: ", sourceIP)
+		}
+
+		// if nodeIP is not set, fetch it from the msg header
+		if upf.nodeIP.String() == "0.0.0.0" {
+			addrString := strings.Split(addr.String(), ":")
+			upf.nodeIP = getLocalIP(addrString[0])
+			log.Println("Node IP address is now: ", upf.nodeIP.String())
 		}
 
 		// log.Println("Message: ", msg)
@@ -155,7 +172,7 @@ func pfcpifaceMainLoop(upf *upf, accessIP, coreIP, sourceIP, smfName string) {
 		case message.MsgTypeSessionDeletionRequest:
 			outgoingMessage = pconn.handleSessionDeletionRequest(upf, msg, addr, sourceIP)
 		case message.MsgTypeAssociationReleaseRequest:
-			outgoingMessage = handleAssociationReleaseRequest(msg, addr, sourceIP, accessIP, upf.recoveryTime)
+			outgoingMessage = handleAssociationReleaseRequest(upf, msg, addr, sourceIP, accessIP, upf.recoveryTime)
 			cleanupSessions()
 		default:
 			log.Println("Message type: ", msg.MessageTypeName(), " is currently not supported")

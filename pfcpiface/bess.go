@@ -11,7 +11,6 @@ import (
 	"net"
 	"time"
 
-	"github.com/golang/protobuf/ptypes"
 	pb "github.com/omec-project/upf-epc/pfcpiface/bess_pb"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/wmnsk/go-pfcp/ie"
@@ -112,7 +111,7 @@ func (b *bess) measure(ifName string, f *pb.MeasureCommandGetSummaryArg) *pb.Mea
 		return ifName + "_measure"
 	}
 
-	any, err := ptypes.MarshalAny(f)
+	any, err := anypb.New(f)
 	if err != nil {
 		log.Println("Error marshalling the rule", f, err)
 		return nil
@@ -257,24 +256,7 @@ func (b *bess) setUpfInfo(u *upf, conf *Conf) {
 	}
 	u.accessIP = ParseIP(conf.AccessIface.IfName, "Access")
 	u.coreIP = ParseIP(conf.CoreIface.IfName, "Core")
-	if *n4SrcIPStr != "" {
-		u.n4SrcIP = net.ParseIP(*n4SrcIPStr)
-	} else {
-		u.n4SrcIP = net.ParseIP("0.0.0.0")
-	}
 
-	if conf.CPIface.SrcIP == "" {
-		if conf.CPIface.DestIP != "" {
-			log.Println("Dest address ", conf.CPIface.DestIP)
-			u.n4SrcIP = getLocalIP(conf.CPIface.DestIP)
-			log.Println("SPGWU/UPF address IP: ", u.n4SrcIP.String())
-		}
-	} else {
-		addrs, errin := net.LookupHost(conf.CPIface.SrcIP)
-		if errin == nil {
-			u.n4SrcIP = net.ParseIP(addrs[0])
-		}
-	}
 	// get bess grpc client
 	log.Println("bessIP ", *bessIP)
 
@@ -525,7 +507,7 @@ func (b *bess) addPDR(ctx context.Context, done chan<- bool, p pdr) {
 				intEnc(uint64(p.farID)), /* far_id */
 			},
 		}
-		any, err = ptypes.MarshalAny(f)
+		any, err = anypb.New(f)
 		if err != nil {
 			log.Println("Error marshalling the rule", f, err)
 			return
@@ -563,7 +545,7 @@ func (b *bess) delPDR(ctx context.Context, done chan<- bool, p pdr) {
 				intEnc(uint64(p.protoMask)),        /* proto id-mask */
 			},
 		}
-		any, err = ptypes.MarshalAny(f)
+		any, err = anypb.New(f)
 		if err != nil {
 			log.Println("Error marshalling the rule", f, err)
 			return
@@ -610,7 +592,7 @@ func (b *bess) addFAR(ctx context.Context, done chan<- bool, far far) {
 				intEnc(uint64(far.tunnelPort)),   /* udp gtpu port */
 			},
 		}
-		any, err = ptypes.MarshalAny(f)
+		any, err = anypb.New(f)
 		if err != nil {
 			log.Println("Error marshalling the rule", f, err)
 			return
@@ -631,7 +613,7 @@ func (b *bess) delFAR(ctx context.Context, done chan<- bool, far far) {
 				intEnc(uint64(far.fseID)), /* fseid */
 			},
 		}
-		any, err = ptypes.MarshalAny(f)
+		any, err = anypb.New(f)
 		if err != nil {
 			log.Println("Error marshalling the rule", f, err)
 			return
@@ -661,7 +643,7 @@ func (b *bess) addCounter(ctx context.Context, done chan<- bool, ctrID uint32, c
 			CtrId: ctrID,
 		}
 
-		any, err = ptypes.MarshalAny(f)
+		any, err = anypb.New(f)
 		if err != nil {
 			log.Println("Error marshalling the rule", f, err)
 			return
@@ -680,7 +662,7 @@ func (b *bess) delCounter(ctx context.Context, done chan<- bool, ctrID uint32, c
 			CtrId: ctrID,
 		}
 
-		any, err = ptypes.MarshalAny(f)
+		any, err = anypb.New(f)
 		if err != nil {
 			log.Println("Error marshalling the rule", f, err)
 			return
@@ -696,7 +678,7 @@ func (b *bess) removeAllPDRs(ctx context.Context, done chan<- bool) {
 		var err error
 
 		f := &pb.EmptyArg{}
-		any, err = ptypes.MarshalAny(f)
+		any, err = anypb.New(f)
 		if err != nil {
 			log.Println("Error marshalling the rule", f, err)
 			return
@@ -713,7 +695,7 @@ func (b *bess) removeAllFARs(ctx context.Context, done chan<- bool) {
 		var err error
 
 		f := &pb.EmptyArg{}
-		any, err = ptypes.MarshalAny(f)
+		any, err = anypb.New(f)
 		if err != nil {
 			log.Println("Error marshalling the rule", f, err)
 			return
@@ -730,7 +712,7 @@ func (b *bess) removeAllCounters(ctx context.Context, done chan<- bool, name str
 		var err error
 
 		f := &pb.EmptyArg{}
-		any, err = ptypes.MarshalAny(f)
+		any, err = anypb.New(f)
 		if err != nil {
 			log.Println("Error marshalling the rule", f, err)
 			return

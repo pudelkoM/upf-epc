@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"flag"
 	"log"
 	"math"
@@ -17,6 +18,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/anypb"
 )
+
+// SockAddr : Unix Socket path to read bess notification from
+const SockAddr = "/tmp/notifycp"
 
 var intEnc = func(u uint64) *pb.FieldData {
 	return &pb.FieldData{Encoding: &pb.FieldData_ValueInt{ValueInt: u}}
@@ -32,7 +36,6 @@ type bess struct {
 }
 
 func (b *bess) setInfo(udpConn *net.UDPConn, udpAddr net.Addr, pconn *PFCPConn) {
-	log.Println("bess setUdpConn not handled")
 }
 
 func (b *bess) isConnected(accessIP *net.IP) bool {
@@ -55,9 +58,9 @@ func (b *bess) sendMsgToUPF(method string, pdrs []pdr, fars []far) uint8 {
 	defer cancel()
 	done := make(chan bool)
 
-	log.Println("upf : ", b.client)
-	log.Println("conn : ", b.conn)
 	for _, pdr := range pdrs {
+		// TODO: https://github.com/omec-project/upf-epc/issues/251
+		// pdr.printPDR()
 		switch method {
 		case "add":
 			fallthrough
@@ -68,6 +71,8 @@ func (b *bess) sendMsgToUPF(method string, pdrs []pdr, fars []far) uint8 {
 		}
 	}
 	for _, far := range fars {
+		// TODO: https://github.com/omec-project/upf-epc/issues/251
+		// far.printFAR()
 		switch method {
 		case "add":
 			fallthrough
@@ -244,6 +249,30 @@ func (b *bess) summaryLatencyJitter(uc *upfCollector, ch chan<- prometheus.Metri
 
 }
 
+func (b *bess) notifyListen(notifySockAddr string, reportNotifyChan chan<- uint64) {
+	if notifySockAddr == "" {
+		notifySockAddr = SockAddr
+	}
+	unixConn, err := net.Dial("unixpacket", notifySockAddr)
+	if err != nil {
+		log.Println("dial error:", err)
+		return
+	}
+	defer unixConn.Close()
+
+	for {
+		buf := make([]byte, 512)
+		_, err := unixConn.Read(buf)
+		if err != nil {
+			return
+		}
+
+		d := buf[0:8]
+		fseid := binary.LittleEndian.Uint64(d)
+		reportNotifyChan <- fseid
+	}
+}
+
 func (b *bess) setUpfInfo(u *upf, conf *Conf) {
 	log.Println("setUpfInfo bess")
 	u.simInfo = &conf.SimInfo
@@ -266,6 +295,7 @@ func (b *bess) setUpfInfo(u *upf, conf *Conf) {
 	}
 
 	b.client = pb.NewBESSControlClient(b.conn)
+	go b.notifyListen(conf.NotifySockAddr, u.reportNotifyChan)
 }
 
 func (b *bess) sim(u *upf, method string) {
@@ -299,7 +329,7 @@ func (b *bess) sim(u *upf, method string) {
 
 			precedence: 255,
 
-			fseID:     n3TEID + i,
+			fseID:     uint64(n3TEID + i),
 			ctrID:     i,
 			farID:     n3,
 			needDecap: 0,
@@ -316,7 +346,7 @@ func (b *bess) sim(u *upf, method string) {
 
 			precedence: 1,
 
-			fseID:     n3TEID + i,
+			fseID:     uint64(n3TEID + i),
 			ctrID:     i,
 			farID:     n3,
 			needDecap: 1,
@@ -336,7 +366,7 @@ func (b *bess) sim(u *upf, method string) {
 
 			precedence: 255,
 
-			fseID:     n3TEID + i,
+			fseID:     uint64(n3TEID + i),
 			ctrID:     i,
 			farID:     n6,
 			needDecap: 1,
@@ -355,7 +385,7 @@ func (b *bess) sim(u *upf, method string) {
 
 			precedence: 1,
 
-			fseID:     n3TEID + i,
+			fseID:     uint64(n3TEID + i),
 			ctrID:     i,
 			farID:     n9,
 			needDecap: 1,
@@ -366,7 +396,7 @@ func (b *bess) sim(u *upf, method string) {
 		// create/delete downlink far
 		farDown := far{
 			farID: n3,
-			fseID: n3TEID + i,
+			fseID: uint64(n3TEID + i),
 
 			applyAction:  ActionForward,
 			dstIntf:      ie.DstInterfaceAccess,
@@ -380,7 +410,7 @@ func (b *bess) sim(u *upf, method string) {
 		// create/delete uplink far
 		farN6Up := far{
 			farID: n6,
-			fseID: n3TEID + i,
+			fseID: uint64(n3TEID + i),
 
 			applyAction: ActionForward,
 			dstIntf:     ie.DstInterfaceCore,
@@ -388,7 +418,7 @@ func (b *bess) sim(u *upf, method string) {
 
 		farN9Up := far{
 			farID: n9,
-			fseID: n3TEID + i,
+			fseID: uint64(n3TEID + i),
 
 			applyAction:  ActionForward,
 			dstIntf:      ie.DstInterfaceCore,
@@ -401,59 +431,18 @@ func (b *bess) sim(u *upf, method string) {
 
 		fars := []far{farDown, farN6Up, farN9Up}
 
-		switch timeout := 100 * time.Millisecond; method {
+		switch method {
 		case "create":
-			b.simcreateEntries(pdrs, fars, timeout)
+			b.sendMsgToUPF("add", pdrs, fars)
 
 		case "delete":
-			b.simdeleteEntries(pdrs, fars, timeout)
+			b.sendMsgToUPF("del", pdrs, fars)
 
 		default:
 			log.Fatalln("Unsupported method", method)
 		}
 	}
 	log.Println("Sessions/s:", float64(u.maxSessions)/time.Since(start).Seconds())
-}
-
-func (b *bess) simcreateEntries(pdrs []pdr, fars []far, timeout time.Duration) {
-	calls := len(pdrs) + len(fars)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	done := make(chan bool)
-	for _, pdrv := range pdrs {
-		b.addPDR(ctx, done, pdrv)
-	}
-
-	for _, farv := range fars {
-		b.addFAR(ctx, done, farv)
-	}
-
-	rc := b.GRPCJoin(calls, timeout, done)
-	if !rc {
-		log.Println("Unable to complete GRPC call(s). Deleting")
-		go b.simdeleteEntries(pdrs, fars, timeout)
-	}
-}
-
-func (b *bess) simdeleteEntries(pdrs []pdr, fars []far, timeout time.Duration) {
-	calls := len(pdrs) + len(fars)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	done := make(chan bool)
-	for _, pdrv := range pdrs {
-		b.delPDR(ctx, done, pdrv)
-	}
-
-	for _, farv := range fars {
-		b.delFAR(ctx, done, farv)
-	}
-
-	rc := b.GRPCJoin(calls, timeout, done)
-	if !rc {
-		log.Println("Unable to complete GRPC call(s)")
-	}
 }
 
 func (b *bess) processPDR(ctx context.Context, any *anypb.Any, method string) {

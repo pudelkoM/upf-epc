@@ -152,7 +152,7 @@ func (c *P4rtClient) SetMastership(electionID p4.Uint128) (err error) {
 }
 
 // Init .. Initialize Client
-func (c *P4rtClient) Init(timeout uint32) (err error) {
+func (c *P4rtClient) Init(timeout uint32, reportNotifyChan chan<- uint64) (err error) {
 	// Initialize stream for mastership and packet I/O
 	//ctx, cancel := context.WithTimeout(context.Background(),
 	//                                   time.Duration(timeout) * time.Second)
@@ -176,6 +176,22 @@ func (c *P4rtClient) Init(timeout uint32) (err error) {
 					log.Println("client is master")
 				} else {
 					log.Println("client is not master")
+				}
+			} else if dig := res.GetDigest(); dig != nil {
+				log.Println("Received Digest")
+				for _, p4d := range dig.GetData() {
+					if fseidStr := p4d.GetBitstring(); fseidStr != nil {
+						log.Println("fseid data in digest")
+						fseid := binary.BigEndian.Uint64(fseidStr[4:])
+						reportNotifyChan <- fseid
+					}
+					/*if structVal := p4d.GetStruct(); structVal != nil {
+						log.Println("Struct data in digest")
+						for _, memberVal := range structVal.GetMembers() {
+							fseid := memberVal.GetBitstring()
+							c.reportDigest <- fseid
+						}
+					}*/
 				}
 			} else {
 				log.Println("stream recv: ", res)
@@ -213,7 +229,7 @@ func (c *P4rtClient) WriteFarTable(
 	te.Fields[1].Name = "session_id"
 	fseidVal := make([]byte, 12)
 	binary.BigEndian.PutUint32(fseidVal[:4], farEntry.fseidIP)
-	binary.BigEndian.PutUint32(fseidVal[4:], farEntry.fseID)
+	binary.BigEndian.PutUint64(fseidVal[4:], farEntry.fseID)
 	te.Fields[1].Value = make([]byte, 12)
 	copy(te.Fields[1].Value, fseidVal)
 
@@ -362,7 +378,7 @@ func (c *P4rtClient) WritePdrTable(
 		te.Params[1].Name = "fseid"
 		fseidVal := make([]byte, 12)
 		binary.BigEndian.PutUint32(fseidVal[:4], pdrEntry.fseidIP)
-		binary.BigEndian.PutUint32(fseidVal[4:], pdrEntry.fseID)
+		binary.BigEndian.PutUint64(fseidVal[4:], pdrEntry.fseID)
 		te.Params[1].Value = make([]byte, 12)
 		copy(te.Params[1].Value, fseidVal)
 
@@ -1072,7 +1088,10 @@ func LoadDeviceConfig(deviceConfigPath string) (P4DeviceConfig, error) {
 }
 
 //CreateChannel ... Create p4runtime client channel
-func CreateChannel(host string, deviceID uint64, timeout uint32) (*P4rtClient, error) {
+func CreateChannel(host string,
+	deviceID uint64,
+	timeout uint32,
+	reportNotifyChan chan<- uint64) (*P4rtClient, error) {
 	log.Println("create channel")
 	// Second, check to see if we can reuse the gRPC connection for a new P4RT client
 	conn, err := GetConnection(host)
@@ -1087,7 +1106,7 @@ func CreateChannel(host string, deviceID uint64, timeout uint32) (*P4rtClient, e
 		DeviceID: deviceID,
 	}
 
-	err = client.Init(timeout)
+	err = client.Init(timeout, reportNotifyChan)
 	if err != nil {
 		log.Println("Client Init error: ", err)
 		return nil, err

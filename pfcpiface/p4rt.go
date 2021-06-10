@@ -42,18 +42,17 @@ type counter struct {
 }
 
 type p4rtc struct {
-	host         string
-	deviceID     uint64
-	timeout      uint32
-	accessIPMask net.IPMask
-	accessIP     net.IP
-	p4rtcServer  string
-	p4rtcPort    string
-	p4client     *P4rtClient
-	counters     []counter
-	pfcpConn     *PFCPConn
-	udpConn      *net.UDPConn
-	udpAddr      net.Addr
+	host             string
+	deviceID         uint64
+	timeout          uint32
+	accessIPMask     net.IPMask
+	accessIP         net.IP
+	p4rtcServer      string
+	p4rtcPort        string
+	p4client         *P4rtClient
+	counters         []counter
+	pfcpConn         *PFCPConn
+	reportNotifyChan chan<- uint64
 }
 
 func (p *p4rtc) summaryLatencyJitter(uc *upfCollector, ch chan<- prometheus.Metric) {
@@ -98,7 +97,6 @@ func setSwitchInfo(p4rtClient *P4rtClient) (net.IP, net.IPMask, error) {
 
 func (c *counter) init() {
 	c.allocated = make(map[uint64]uint64)
-	//c.free = make(map[uint64]uint64)
 }
 
 func setCounterSize(p *p4rtc, counterID uint8, name string) error {
@@ -120,16 +118,12 @@ func setCounterSize(p *p4rtc, counterID uint8, name string) error {
 
 func (p *p4rtc) setInfo(conn *net.UDPConn, addr net.Addr, pconn *PFCPConn) {
 	log.Println("setUDP Conn ", conn)
-	p.udpConn = conn
-	p.udpAddr = addr
 	p.pfcpConn = pconn
 }
 
 func resetCounterVal(p *p4rtc, counterID uint8, val uint64) {
 	log.Println("delete counter val ", val)
-	//p.counters[counterID].allocated[val]=nil
 	delete(p.counters[counterID].allocated, val)
-	//p.counters[counterID].free[val] = 1
 }
 
 func getCounterVal(p *p4rtc, counterID uint8, pdrID uint32) (uint64, error) {
@@ -164,7 +158,7 @@ func (p *p4rtc) exit() {
 func (p *p4rtc) channelSetup() (*P4rtClient, error) {
 	log.Println("Channel Setup.")
 	localclient, errin := CreateChannel(p.host,
-		p.deviceID, p.timeout)
+		p.deviceID, p.timeout, p.reportNotifyChan)
 	if errin != nil {
 		log.Println("create channel failed : ", errin)
 		return nil, errin
@@ -269,6 +263,7 @@ func (p *p4rtc) setUpfInfo(u *upf, conf *Conf) {
 	p.p4rtcServer = conf.P4rtcIface.P4rtcServer
 	log.Println("p4rtc server ip/name", p.p4rtcServer)
 	p.p4rtcPort = conf.P4rtcIface.P4rtcPort
+	p.reportNotifyChan = u.reportNotifyChan
 
 	if *p4RtcServerIP != "" {
 		p.p4rtcServer = *p4RtcServerIP
@@ -308,8 +303,7 @@ func (p *p4rtc) setUpfInfo(u *upf, conf *Conf) {
 	}
 }
 
-func (p *p4rtc) sendMsgToUPF(method string, pdrs []pdr,
-	fars []far) uint8 {
+func (p *p4rtc) sendMsgToUPF(method string, pdrs []pdr, fars []far) uint8 {
 	log.Println("sendMsgToUPF p4")
 	var funcType uint8
 	var err error

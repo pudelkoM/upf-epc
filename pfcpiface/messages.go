@@ -85,12 +85,17 @@ func (pc *PFCPConn) handleAssociationSetupRequest(upf *upf, msg message.Message,
 
 	pc.mgr.nodeID = nodeID
 	log.Println("Association setup NodeID : ", pc.mgr.nodeID)
+	features := make([]uint8, 4)
 	if upf.enableUeIPAlloc {
-		features := make([]uint8, 4)
 		setUeipFeature(features...)
-		asresmsg.UPFunctionFeatures =
-			ie.NewUPFunctionFeatures(features...)
 	}
+
+	if upf.enableEndMarker {
+		setEndMarkerFeature(features...)
+	}
+
+	asresmsg.UPFunctionFeatures =
+		ie.NewUPFunctionFeatures(features...)
 	asres, err := asresmsg.Marshal()
 	if err != nil {
 		log.Fatalln("Unable to create association setup response", err)
@@ -248,7 +253,7 @@ func (pc *PFCPConn) handleSessionReportResponse(upf *upf, msg message.Message, a
 			}
 			log.Println("context not found. Delete session locally")
 			pc.mgr.RemoveSession(srres.SEID())
-			cause := upf.sendMsgToUPF("del", sessItem.pdrs, sessItem.fars)
+			cause := upf.sendMsgToUPF("del", sessItem.pdrs, sessItem.fars, sessItem.qers)
 			if cause == ie.CauseRequestRejected {
 				log.Println("Write to FastPath failed")
 			}
@@ -336,7 +341,16 @@ func (pc *PFCPConn) handleSessionEstablishmentRequest(upf *upf, msg message.Mess
 		session.CreateFAR(f)
 	}
 
-	cause := upf.sendMsgToUPF("add", session.pdrs, session.fars)
+	for _, cQER := range sereq.CreateQER {
+		var q qer
+		if err := q.parseQER(cQER, session.localSEID, upf); err != nil {
+			return sendError(err, ie.CauseRequestRejected)
+		}
+		q.fseidIP = fseidIP
+		session.CreateQER(q)
+	}
+
+	cause := upf.sendMsgToUPF("add", session.pdrs, session.fars, session.qers)
 	if cause == ie.CauseRequestRejected {
 		pc.mgr.RemoveSession(session.localSEID)
 		return sendError(errors.New("Write to FastPath failed"),
@@ -415,6 +429,8 @@ func (pc *PFCPConn) handleSessionModificationRequest(upf *upf, msg message.Messa
 
 	addPDRs := make([]pdr, 0, MaxItems)
 	addFARs := make([]far, 0, MaxItems)
+	addQERs := make([]qer, 0, MaxItems)
+	endMarkerList := make([][]byte, 0, MaxItems)
 	for _, cPDR := range smreq.CreatePDR {
 		var p pdr
 		if err := p.parsePDR(cPDR, localSEID, pc.mgr.appPFDs, upf); err != nil {
@@ -433,6 +449,16 @@ func (pc *PFCPConn) handleSessionModificationRequest(upf *upf, msg message.Messa
 		f.fseidIP = fseidIP
 		session.CreateFAR(f)
 		addFARs = append(addFARs, f)
+	}
+
+	for _, cQER := range smreq.CreateQER {
+		var q qer
+		if err := q.parseQER(cQER, localSEID, upf); err != nil {
+			return sendError(err)
+		}
+		q.fseidIP = fseidIP
+		session.CreateQER(q)
+		addQERs = append(addQERs, q)
 	}
 
 	for _, uPDR := range smreq.UpdatePDR {
@@ -457,7 +483,7 @@ func (pc *PFCPConn) handleSessionModificationRequest(upf *upf, msg message.Messa
 			return sendError(err)
 		}
 		f.fseidIP = fseidIP
-		err = session.UpdateFAR(f)
+		err = session.UpdateFAR(&f, &endMarkerList)
 		if err != nil {
 			log.Println("session PDR update failed ", err)
 			continue
@@ -465,16 +491,40 @@ func (pc *PFCPConn) handleSessionModificationRequest(upf *upf, msg message.Messa
 		addFARs = append(addFARs, f)
 	}
 
+	for _, uQER := range smreq.UpdateQER {
+		var q qer
+		var err error
+		if err = q.parseQER(uQER, localSEID, upf); err != nil {
+			return sendError(err)
+		}
+		q.fseidIP = fseidIP
+		err = session.UpdateQER(q)
+		if err != nil {
+			log.Println("session QER update failed ", err)
+			continue
+		}
+		addQERs = append(addQERs, q)
+	}
+
 	if session.getNotifyFlag() {
 		session.updateNotifyFlag()
 	}
-	cause := upf.sendMsgToUPF("mod", addPDRs, addFARs)
+
+	cause := upf.sendMsgToUPF("mod", addPDRs, addFARs, addQERs)
 	if cause == ie.CauseRequestRejected {
 		return sendError(errors.New("Write to FastPath failed"))
 	}
 
+	if upf.enableEndMarker {
+		err := upf.sendEndMarkers(&endMarkerList)
+		if err != nil {
+			log.Println("Sending End Markers Failed : ", err)
+		}
+	}
+
 	delPDRs := make([]pdr, 0, MaxItems)
 	delFARs := make([]far, 0, MaxItems)
+	delQERs := make([]qer, 0, MaxItems)
 
 	for _, rPDR := range smreq.RemovePDR {
 		pdrID, err := rPDR.PDRID()
@@ -502,7 +552,20 @@ func (pc *PFCPConn) handleSessionModificationRequest(upf *upf, msg message.Messa
 		delFARs = append(delFARs, *f)
 	}
 
-	cause = upf.sendMsgToUPF("del", delPDRs, delFARs)
+	for _, dQER := range smreq.RemoveQER {
+		qerID, err := dQER.QERID()
+		if err != nil {
+			return sendError(err)
+		}
+
+		q, err := session.RemoveQER(qerID)
+		if err != nil {
+			return sendError(err)
+		}
+		delQERs = append(delQERs, *q)
+	}
+
+	cause = upf.sendMsgToUPF("del", delPDRs, delFARs, delQERs)
 	if cause == ie.CauseRequestRejected {
 		return sendError(errors.New("Write to FastPath failed"))
 	}
@@ -560,7 +623,7 @@ func (pc *PFCPConn) handleSessionDeletionRequest(upf *upf, msg message.Message, 
 		return sendError(fmt.Errorf("Session not found: %v", localSEID))
 	}
 
-	cause := upf.sendMsgToUPF("del", session.pdrs, session.fars)
+	cause := upf.sendMsgToUPF("del", session.pdrs, session.fars, session.qers)
 	if cause == ie.CauseRequestRejected {
 		return sendError(errors.New("Write to FastPath failed"))
 	}

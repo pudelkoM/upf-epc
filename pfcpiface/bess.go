@@ -22,6 +22,9 @@ import (
 // SockAddr : Unix Socket path to read bess notification from
 const SockAddr = "/tmp/notifycp"
 
+// PfcpAddr : Unix Socket path to send end marker packet
+const PfcpAddr = "/tmp/pfcpport"
+
 var intEnc = func(u uint64) *pb.FieldData {
 	return &pb.FieldData{Encoding: &pb.FieldData_ValueInt{ValueInt: u}}
 }
@@ -31,8 +34,11 @@ var (
 )
 
 type bess struct {
-	client pb.BESSControlClient
-	conn   *grpc.ClientConn
+	client           pb.BESSControlClient
+	conn             *grpc.ClientConn
+	endMarkerSocket  net.Conn
+	notifyBessSocket net.Conn
+	endMarkerChan    chan []byte
 }
 
 func (b *bess) setInfo(udpConn *net.UDPConn, udpAddr net.Addr, pconn *PFCPConn) {
@@ -46,10 +52,18 @@ func (b *bess) isConnected(accessIP *net.IP) bool {
 	return true
 }
 
-func (b *bess) sendMsgToUPF(method string, pdrs []pdr, fars []far) uint8 {
+func (b *bess) sendEndMarkers(endMarkerList *[][]byte) error {
+	for _, eMarker := range *endMarkerList {
+		b.endMarkerChan <- eMarker
+	}
+
+	return nil
+}
+
+func (b *bess) sendMsgToUPF(method string, pdrs []pdr, fars []far, qers []qer) uint8 {
 	// create context
 	var cause uint8 = ie.CauseRequestAccepted
-	calls := len(pdrs) + len(fars)
+	calls := len(pdrs) + len(fars) + len(qers)
 	if calls == 0 {
 		return cause
 	}
@@ -80,6 +94,17 @@ func (b *bess) sendMsgToUPF(method string, pdrs []pdr, fars []far) uint8 {
 			b.addFAR(ctx, done, far)
 		case "del":
 			b.delFAR(ctx, done, far)
+		}
+	}
+	for _, qer := range qers {
+		// qer.printQER()
+		switch method {
+		case "add":
+			fallthrough
+		case "mod":
+			b.addQER(ctx, done, qer)
+		case "del":
+			b.delQER(ctx, done, qer)
 		}
 	}
 	rc := b.GRPCJoin(calls, Timeout, done)
@@ -249,20 +274,20 @@ func (b *bess) summaryLatencyJitter(uc *upfCollector, ch chan<- prometheus.Metri
 
 }
 
-func (b *bess) notifyListen(notifySockAddr string, reportNotifyChan chan<- uint64) {
-	if notifySockAddr == "" {
-		notifySockAddr = SockAddr
+func (b *bess) endMarkerSendLoop(endMarkerChan chan []byte) {
+	for outPacket := range endMarkerChan {
+		_, err := b.endMarkerSocket.Write(outPacket)
+		if err != nil {
+			log.Println("end marker write failed")
+		}
 	}
-	unixConn, err := net.Dial("unixpacket", notifySockAddr)
-	if err != nil {
-		log.Println("dial error:", err)
-		return
-	}
-	defer unixConn.Close()
+}
+
+func (b *bess) notifyListen(reportNotifyChan chan<- uint64) {
 
 	for {
 		buf := make([]byte, 512)
-		_, err := unixConn.Read(buf)
+		_, err := b.notifyBessSocket.Read(buf)
 		if err != nil {
 			return
 		}
@@ -288,6 +313,7 @@ func (b *bess) setUpfInfo(u *upf, conf *Conf) {
 
 	// get bess grpc client
 	log.Println("bessIP ", *bessIP)
+	b.endMarkerChan = make(chan []byte, 1024)
 
 	b.conn, errin = grpc.Dial(*bessIP, grpc.WithInsecure())
 	if errin != nil {
@@ -295,7 +321,32 @@ func (b *bess) setUpfInfo(u *upf, conf *Conf) {
 	}
 
 	b.client = pb.NewBESSControlClient(b.conn)
-	go b.notifyListen(conf.NotifySockAddr, u.reportNotifyChan)
+	if conf.EnableNotifyBess {
+		notifySockAddr := conf.NotifySockAddr
+		if notifySockAddr == "" {
+			notifySockAddr = SockAddr
+		}
+		b.notifyBessSocket, errin = net.Dial("unixpacket", notifySockAddr)
+		if errin != nil {
+			log.Println("dial error:", errin)
+			return
+		}
+		go b.notifyListen(u.reportNotifyChan)
+	}
+
+	if conf.EnableEndMarker {
+		pfcpCommAddr := conf.EndMarkerSockAddr
+		if pfcpCommAddr == "" {
+			pfcpCommAddr = PfcpAddr
+		}
+		b.endMarkerSocket, errin = net.Dial("unixpacket", pfcpCommAddr)
+		if errin != nil {
+			log.Println("dial error:", errin)
+			return
+		}
+		log.Println("Starting end marker loop")
+		go b.endMarkerSendLoop(b.endMarkerChan)
+	}
 }
 
 func (b *bess) sim(u *upf, method string) {
@@ -332,6 +383,7 @@ func (b *bess) sim(u *upf, method string) {
 			fseID:     uint64(n3TEID + i),
 			ctrID:     i,
 			farID:     n3,
+			qerID:     n3,
 			needDecap: 0,
 		}
 
@@ -349,6 +401,7 @@ func (b *bess) sim(u *upf, method string) {
 			fseID:     uint64(n3TEID + i),
 			ctrID:     i,
 			farID:     n3,
+			qerID:     n3,
 			needDecap: 1,
 		}
 
@@ -369,6 +422,7 @@ func (b *bess) sim(u *upf, method string) {
 			fseID:     uint64(n3TEID + i),
 			ctrID:     i,
 			farID:     n6,
+			qerID:     n6,
 			needDecap: 1,
 		}
 
@@ -388,6 +442,7 @@ func (b *bess) sim(u *upf, method string) {
 			fseID:     uint64(n3TEID + i),
 			ctrID:     i,
 			farID:     n9,
+			qerID:     n9,
 			needDecap: 1,
 		}
 
@@ -431,12 +486,51 @@ func (b *bess) sim(u *upf, method string) {
 
 		fars := []far{farDown, farN6Up, farN9Up}
 
+		// create/delete uplink qer
+		qerDown := qer{
+			qerID: n3,
+			fseID: uint64(n3TEID + i),
+
+			qfi:      9,
+			ulStatus: 0,
+			dlStatus: 0,
+			ulMbr:    50000,
+			dlMbr:    50000,
+			ulGbr:    50000,
+			dlGbr:    50000,
+		}
+
+		qerN6Up := qer{
+			qerID:    n6,
+			fseID:    uint64(n3TEID + i),
+			qfi:      8,
+			ulStatus: 0,
+			dlStatus: 0,
+			ulMbr:    50000,
+			dlMbr:    50000,
+			ulGbr:    50000,
+			dlGbr:    50000,
+		}
+
+		qerN9Up := qer{
+			qerID:    n9,
+			fseID:    uint64(n3TEID + i),
+			qfi:      7,
+			ulStatus: 0,
+			dlStatus: 0,
+			ulMbr:    50000,
+			dlMbr:    50000,
+			ulGbr:    50000,
+			dlGbr:    50000,
+		}
+
+		qers := []qer{qerDown, qerN6Up, qerN9Up}
 		switch method {
 		case "create":
-			b.sendMsgToUPF("add", pdrs, fars)
+			b.sendMsgToUPF("add", pdrs, fars, qers)
 
 		case "delete":
-			b.sendMsgToUPF("del", pdrs, fars)
+			b.sendMsgToUPF("del", pdrs, fars, qers)
 
 		default:
 			log.Fatalln("Unsupported method", method)
@@ -493,6 +587,7 @@ func (b *bess) addPDR(ctx context.Context, done chan<- bool, p pdr) {
 				intEnc(uint64(p.pdrID)), /* pdr-id */
 				intEnc(uint64(p.fseID)), /* fseid */
 				intEnc(uint64(p.ctrID)), /* ctr_id */
+				intEnc(uint64(p.qerID)), /* qer_id */
 				intEnc(uint64(p.farID)), /* far_id */
 			},
 		}
@@ -541,6 +636,73 @@ func (b *bess) delPDR(ctx context.Context, done chan<- bool, p pdr) {
 		}
 
 		b.processPDR(ctx, any, "delete")
+		done <- true
+	}()
+}
+
+func (b *bess) processQER(ctx context.Context, any *anypb.Any, method string) {
+	if method != "add" && method != "delete" && method != "clear" {
+		log.Println("Invalid method name: ", method)
+		return
+	}
+
+	_, err := b.client.ModuleCommand(ctx, &pb.CommandRequest{
+		Name: "qerLookup",
+		Cmd:  method,
+		Arg:  any,
+	})
+	if err != nil {
+		log.Println("qerLookup method failed!:", err)
+	}
+}
+
+func (b *bess) addQER(ctx context.Context, done chan<- bool, qer qer) {
+	go func() {
+		var any *anypb.Any
+		var err error
+		q := &pb.ExactMatchCommandAddArg{
+			Gate: uint64(0),
+			Fields: []*pb.FieldData{
+				intEnc(uint64(qer.qerID)), /* far_id */
+				intEnc(uint64(qer.fseID)), /* fseid */
+			},
+			Values: []*pb.FieldData{
+				intEnc(uint64(qer.qfi)),      /* action */
+				intEnc(uint64(qer.ulStatus)), /* QFI */
+				intEnc(uint64(qer.dlStatus)), /* tunnel_out_type */
+				intEnc(uint64(qer.ulMbr)),    /* access-ip */
+				intEnc(uint64(qer.dlMbr)),    /* enb ip */
+				intEnc(uint64(qer.ulGbr)),    /* enb teid */
+				intEnc(uint64(qer.dlGbr)),    /* udp gtpu port */
+			},
+		}
+		any, err = anypb.New(q)
+		if err != nil {
+			log.Println("Error marshalling the rule", q, err)
+			return
+		}
+		b.processQER(ctx, any, "add")
+		done <- true
+	}()
+}
+
+func (b *bess) delQER(ctx context.Context, done chan<- bool, qer qer) {
+	go func() {
+		var any *anypb.Any
+		var err error
+
+		q := &pb.ExactMatchCommandDeleteArg{
+			Fields: []*pb.FieldData{
+				intEnc(uint64(qer.qerID)), /* qer_id */
+				intEnc(uint64(qer.fseID)), /* fseid */
+			},
+		}
+		any, err = anypb.New(q)
+		if err != nil {
+			log.Println("Error marshalling the rule", q, err)
+			return
+		}
+		b.processQER(ctx, any, "delete")
 		done <- true
 	}()
 }

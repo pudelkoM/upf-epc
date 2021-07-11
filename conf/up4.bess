@@ -27,6 +27,7 @@ farBufferAction = 3
 farNotifyCPAction = 4
 pdrFailGate = 2
 farFailGate = 2
+qerFailGate = 1
 interfaces = ["access", "core"]
 parser = Parser('conf/upf.json')
 parser.parse(interfaces)
@@ -131,9 +132,9 @@ for idx, iface in enumerate(interfaces):
 
     # setup port module with auxiliary modules
     if parser.mode == 'sim':
-        p.setup_port(parser.ip_frag_with_eth_mtu, parser.measure, packet_generator[iface], **seq_kwargs[iface])
+        p.setup_port(parser.ip_frag_with_eth_mtu, parser.max_ip_defrag_flows, parser.measure, packet_generator[iface], **seq_kwargs[iface])
     else:
-        p.setup_port(parser.ip_frag_with_eth_mtu, parser.measure)
+        p.setup_port(parser.ip_frag_with_eth_mtu, parser.max_ip_defrag_flows, parser.measure)
 
     # Finally add entry to ports list
     ports[p.name] = p
@@ -183,6 +184,7 @@ linkMerge::Merge() \
                                 values=[{'attr_name':'pdr_id', 'num_bytes':4}, \
                                         {'attr_name':'fseid', 'num_bytes':8}, \
                                         {'attr_name':'ctr_id', 'num_bytes':4}, \
+                                        {'attr_name':'qer_id', 'num_bytes':4}, \
                                         {'attr_name':'far_id', 'num_bytes':4}]):noGTPUDecap \
     -> preQoSCounter::Counter(name_id='ctr_id', check_exist=True, total=parser.max_sessions)
 
@@ -192,6 +194,17 @@ if ntf:
   _in -> ntf
   _in = ntf
 
+_in -> qerLookup::ExactMatch(fields=[{'attr_name':'qer_id', 'num_bytes':4}, \
+                                     {'attr_name':'fseid', 'num_bytes':8}], \
+                             values=[{'attr_name':'qfi', 'num_bytes':1}, \
+                                     {'attr_name':'ulStatus', 'num_bytes':1},\
+                                     {'attr_name':'dlStatus', 'num_bytes':1},\
+                                     {'attr_name':'ulMbr', 'num_bytes':4},\
+                                     {'attr_name':'dlMbr', 'num_bytes':4},\
+                                     {'attr_name':'ulGbr', 'num_bytes':4},\
+                                     {'attr_name':'dlGbr', 'num_bytes':4}])
+
+_in = qerLookup
 _in -> farLookup::ExactMatch(fields=[{'attr_name':'far_id', 'num_bytes':4}, \
                                      {'attr_name':'fseid', 'num_bytes':8}], \
                              values=[{'attr_name':'action', 'num_bytes':1}, \
@@ -217,13 +230,14 @@ farLookup:GTPUEncap \
 
 notify = UnixSocketPort(name='notifyCP', path=parser.notify_sockaddr)
 pfcpPort = UnixSocketPort(name='pfcpPort', path=parser.endmarker_sockaddr)
-PortInc(port='pfcpPort') -> ports[parser.access_ifname].rtr
-executeFAR:farNotifyCPAction -> GenericEncap(fields=[ {'size': 8, 'attribute': 'fseid'}]) \
+pfcpPI::PortInc(port='pfcpPort') -> ports[parser.access_ifname].rtr
+executeFAR:farNotifyCPAction -> pfcpDetails::GenericEncap(fields=[ {'size': 8, 'attribute': 'fseid'}]) \
                              -> farNotifyCP::PortOut(port='notifyCP')
 # Drop unknown packets
 pktParse:0 -> badPkts::Sink()
 pdrLookup:pdrFailGate -> pdrLookupFail::Sink()
 farLookup:farFailGate -> farLookupFail::Sink()
+qerLookup:qerFailGate -> qerLookupFail::Sink()
 executeFAR:farDropAction -> farDrop::Sink()
 executeFAR:farBufferAction -> farBuffer::Sink()
 gtpuEncap:0 -> gtpuEncapFail::Sink()
@@ -231,6 +245,7 @@ gtpuEncap:0 -> gtpuEncapFail::Sink()
 # Set default gates for relevant modules
 pdrLookup.set_default_gate(gate=pdrFailGate)
 farLookup.set_default_gate(gate=farFailGate)
+qerLookup.set_default_gate(gate=qerFailGate)
 
 
 # ====================================================
@@ -259,14 +274,6 @@ if ports[parser.core_ifname].nat is not None:
     _in:gate -> 1:ports[parser.core_ifname].nat
     _in = ports[parser.core_ifname].nat
     gate = 0
-
-# Append coreIP4Defrag module (if enabled)
-if parser.max_ip_defrag_flows is not None:
-    _in:gate -> coreIP4Defrag::IPDefrag(num_flows=parser.max_ip_defrag_flows, numa=0)
-    _in = coreIP4Defrag
-    gate = 1
-    # Drop pkts that are unable to be fragmented
-    coreIP4Defrag:0 -> coreIP4DefragFail::Sink()
 
 # 2. Build the remaining first half of the DL pipeline before entering the shared pipeline
 #ports[parser.core_ifname].rewrite \
@@ -326,14 +333,6 @@ accessFastBPF:GTPUGate \
 # Record last module to chain up option modules
 _in = accessRxUDPCksum
 gate = 0
-
-# Append accessIP4Defrag module (if enabled)
-if parser.max_ip_defrag_flows is not None:
-    _in:gate ->accessIP4Defrag::IPDefrag(num_flows=parser.max_ip_defrag_flows, numa=0)
-    _in = accessIP4Defrag
-    gate = 1
-    # Drop pkts that are unable to be fragmented
-    accessIP4Defrag:0 -> accessIP4DefragFail::Sink()
 
 # 2. Build the remaining first half of the UL pipeline before entering the shard pipeline
 #ports[parser.access_ifname].rewrite \

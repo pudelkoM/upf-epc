@@ -53,6 +53,7 @@ type p4rtc struct {
 	counters         []counter
 	pfcpConn         *PFCPConn
 	reportNotifyChan chan<- uint64
+	endMarkerChan    chan []byte
 }
 
 func (p *p4rtc) summaryLatencyJitter(uc *upfCollector, ch chan<- prometheus.Metric) {
@@ -244,7 +245,7 @@ func (p *p4rtc) sendDeleteAllSessionsMsgtoUPF() {
 	log.Println("Loop through sessions and delete all entries p4")
 	if (p.pfcpConn != nil) && (p.pfcpConn.mgr != nil) {
 		for seidKey, value := range p.pfcpConn.mgr.sessions {
-			p.sendMsgToUPF("del", value.pdrs, value.fars)
+			p.sendMsgToUPF("del", value.pdrs, value.fars, nil)
 			p.pfcpConn.mgr.RemoveSession(seidKey)
 		}
 	}
@@ -301,9 +302,30 @@ func (p *p4rtc) setUpfInfo(u *upf, conf *Conf) {
 	if errin != nil {
 		log.Println("Counter Init failed. : ", errin)
 	}
+	if conf.EnableEndMarker {
+		log.Println("Starting end marker loop")
+		p.endMarkerChan = make(chan []byte, 1024)
+		go p.endMarkerSendLoop(p.endMarkerChan)
+	}
 }
 
-func (p *p4rtc) sendMsgToUPF(method string, pdrs []pdr, fars []far) uint8 {
+func (p *p4rtc) sendEndMarkers(endMarkerList *[][]byte) error {
+	for _, eMarker := range *endMarkerList {
+		p.endMarkerChan <- eMarker
+	}
+	return nil
+}
+
+func (p *p4rtc) endMarkerSendLoop(endMarkerChan chan []byte) {
+	for outPacket := range endMarkerChan {
+		err := p.p4client.SendPacketOut(outPacket)
+		if err != nil {
+			log.Println("end marker write failed")
+		}
+	}
+}
+func (p *p4rtc) sendMsgToUPF(method string, pdrs []pdr,
+	fars []far, qers []qer) uint8 {
 	log.Println("sendMsgToUPF p4")
 	var funcType uint8
 	var err error

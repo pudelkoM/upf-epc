@@ -26,8 +26,6 @@ const (
 	MaxCir = 4000000000
 	//MaxPir val
 	MaxPir = 4000000000
-	//DefaultQfi val
-	DefaultQfi = 9
 	//DefaultBurstSize val
 	DefaultBurstSize = 2048
 	// SockAddr : Unix Socket path to read bess notification from
@@ -678,27 +676,25 @@ func (b *bess) addQER(ctx context.Context, done chan<- bool, qer qer) {
 		var any *anypb.Any
 		var err error
 		var cir, pir, cbs, ebs, pbs uint64
-		var srcIface, qfiVal uint8
-		if qfi, ok := b.qciQosMap[qer.qfi]; ok {
-			qfiVal = qer.qfi
-			cbs = uint64(qfi.cbs)
-			ebs = uint64(qfi.ebs)
-			pbs = uint64(qfi.pbs)
+		var srcIface uint8
+		if qosVal, ok := b.qciQosMap[qer.qfi]; ok {
+			cbs = uint64(qosVal.cbs)
+			ebs = uint64(qosVal.ebs)
+			pbs = uint64(qosVal.pbs)
 		} else {
 			log.Println("No config for qfi/qci : ", qer.qfi,
-				". Using default qfi 9.")
-			qfiVal = DefaultQfi
+				". Using default burst size.")
 			cbs = uint64(DefaultBurstSize)
 			ebs = uint64(DefaultBurstSize)
 			pbs = uint64(DefaultBurstSize)
 		}
 		if qer.ulMbr != 0 {
 			/* MBR/GBR is received in Kilobits/sec.
-			   CIR/PIR is sent in bits/sec */
-			pir = qer.ulMbr * 1000
-			cir = qer.ulMbr * 1000
+			   CIR/PIR is sent in bytes */
+			pir = (qer.ulMbr * 1000) / 8
+			cir = (qer.ulMbr * 1000) / 8
 			if qer.ulGbr != 0 {
-				cir = qer.ulGbr * 1000
+				cir = (qer.ulGbr * 1000) / 8
 			}
 			if cir >= MaxUint32 {
 				cir = MaxCir
@@ -715,12 +711,12 @@ func (b *bess) addQER(ctx context.Context, done chan<- bool, qer qer) {
 					intEnc(uint64(qer.fseID)), /* fseid */
 				},
 				Values: []*pb.FieldData{
-					intEnc(uint64(qfiVal)), /* QFI */
-					intEnc(uint64(cir)),    /* committed info rate */
-					intEnc(uint64(pir)),    /* Peak Info rate */
-					intEnc(uint64(cbs)),    /* committed burst size */
-					intEnc(uint64(pbs)),    /* Peak burst size */
-					intEnc(uint64(ebs)),    /* Excess burst size */
+					intEnc(uint64(qer.qfi)), /* QFI */
+					intEnc(uint64(cir)),     /* committed info rate */
+					intEnc(uint64(pir)),     /* Peak Info rate */
+					intEnc(uint64(cbs)),     /* committed burst size */
+					intEnc(uint64(pbs)),     /* Peak burst size */
+					intEnc(uint64(ebs)),     /* Excess burst size */
 				},
 			}
 			any, err = anypb.New(q)
@@ -732,10 +728,10 @@ func (b *bess) addQER(ctx context.Context, done chan<- bool, qer qer) {
 		}
 
 		if qer.dlMbr != 0 {
-			pir = qer.dlMbr * 1000
-			cir = qer.dlMbr * 1000
+			pir = (qer.dlMbr * 1000) / 8
+			cir = (qer.dlMbr * 1000) / 8
 			if qer.dlGbr != 0 {
-				cir = qer.dlGbr * 1000
+				cir = (qer.dlGbr * 1000) / 8
 			}
 			if cir >= MaxUint32 {
 				cir = MaxCir
@@ -752,12 +748,12 @@ func (b *bess) addQER(ctx context.Context, done chan<- bool, qer qer) {
 					intEnc(uint64(qer.fseID)), /* fseid */
 				},
 				Values: []*pb.FieldData{
-					intEnc(uint64(qfiVal)), /* QFI */
-					intEnc(uint64(cir)),    /* committed info rate */
-					intEnc(uint64(pir)),    /* Peak Info rate */
-					intEnc(uint64(cbs)),    /* committed burst size */
-					intEnc(uint64(pbs)),    /* Peak burst size */
-					intEnc(uint64(ebs)),    /* Excess burst size */
+					intEnc(uint64(qer.qfi)), /* QFI */
+					intEnc(uint64(cir)),     /* committed info rate */
+					intEnc(uint64(pir)),     /* Peak Info rate */
+					intEnc(uint64(cbs)),     /* committed burst size */
+					intEnc(uint64(pbs)),     /* Peak burst size */
+					intEnc(uint64(ebs)),     /* Excess burst size */
 				},
 			}
 			any, err = anypb.New(q)

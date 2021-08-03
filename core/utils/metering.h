@@ -156,6 +156,7 @@ class Metering {
 
   void Clear() { table_->Clear(); }
   int Count() { return table_->Count(); }
+  void DeInit() {table_->DeInit();}
 
   // Find an entry in the table.
   // Returns the value if `key` matches a rule, otherwise `default_value`.

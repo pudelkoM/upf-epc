@@ -132,7 +132,7 @@ void Qos::ProcessBatch(Context *ctx, bess::PacketBatch *batch) {
   default_gate = ACCESS_ONCE(default_gate_);
 
   int cnt = batch->cnt();
-  struct QosData *val[cnt];
+  struct value *val[cnt];
   default_gate = ACCESS_ONCE(default_gate_);
 
   for (const auto &field : fields_) {
@@ -276,7 +276,7 @@ CommandResponse Qos::ExtractKey(const T &arg, MeteringKey *key) {
 
 template <typename T>
 CommandResponse Qos::ExtractKeyMask(const T &arg, MeteringKey *key,
-                                    QosData *val, MKey *l) {
+                                    MeteringKey *val, MKey *l) {
   if ((size_t)arg.fields_size() != fields_.size()) {
     return CommandFailure(EINVAL, "must specify %zu masks", fields_.size());
   }
@@ -353,35 +353,35 @@ CommandResponse Qos::ExtractKeyMask(const T &arg, MeteringKey *key,
 
 CommandResponse Qos::CommandAdd(const bess::pb::QosCommandAddArg &arg) {
   gate_idx_t gate = arg.gate();
-  MeteringKey key = {{0}};
-
-  MKey l;
-  struct QosData data;
-  data.ogate = gate;
-  CommandResponse err = ExtractKeyMask(arg, &key, &data, &l);
-
-  if (err.error().code() != 0) {
-    return err;
-  }
 
   if (!is_valid_gate(gate)) {
     return CommandFailure(EINVAL, "Invalid gate: %hu", gate);
   }
+  MeteringKey key = {{0}};
 
+  MKey l;
+  struct value v ;
+  v.ogate = gate;
+  CommandResponse err = ExtractKeyMask(arg, &key, &v.Data, &l);
+
+  if (err.error().code() != 0) {
+    return err;
+  }
+  
+  struct QosData *data=(struct QosData*)&v.Data;
   struct rte_meter_srtcm_params app_srtcm_params = {
-      .cir = data.cir, .cbs = data.cbs, .ebs = data.ebs};
+      .cir = data->cir, .cbs = data->cbs, .ebs = data->ebs};
 
-  int ret = rte_meter_srtcm_profile_config(&data.p, &app_srtcm_params);
+  int ret = rte_meter_srtcm_profile_config(&v.p, &app_srtcm_params);
   if (ret)
     return CommandFailure(
         ret, "Insert Failed - rte_meter_srtcm_profile_config failed");
 
-  ret = rte_meter_srtcm_config(&data.m, &data.p);
+  ret = rte_meter_srtcm_config(&v.m, &v.p);
   if (ret) {
     return CommandFailure(ret, "Insert Failed - rte_meter_srtcm_config failed");
   }
-
-  table_.Add(data, key);
+  table_.Add(v, key);
   return CommandSuccess();
 }
 
@@ -400,6 +400,10 @@ CommandResponse Qos::CommandClear(__attribute__((unused))
 
 void Qos::Clear() {
   table_.Clear();
+}
+
+void Qos::DeInit() {
+   table_.DeInit(); 
 }
 
 CommandResponse Qos::CommandSetDefaultGate(

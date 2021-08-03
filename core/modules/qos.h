@@ -65,9 +65,13 @@ struct QosData {
   uint32_t cbs;
   uint32_t pbs;
   uint32_t ebs;
+} __attribute__((packed));
+
+struct value {
   gate_idx_t ogate;
   struct rte_meter_srtcm_profile p;
   struct rte_meter_srtcm m;
+  MeteringKey Data;  
 } __attribute__((packed));
 
 struct MKey {
@@ -96,14 +100,14 @@ class Qos final : public Module {
   CommandResponse CommandSetDefaultGate(
       const bess::pb::QosCommandSetDefaultGateArg &arg);
   template <typename T>
-  CommandResponse ExtractKeyMask(const T &arg, MeteringKey *key, QosData *val,
+  CommandResponse ExtractKeyMask(const T &arg, MeteringKey *key, MeteringKey *val,
                                  MKey *l);
   template <typename T>
   CommandResponse ExtractKey(const T &arg, MeteringKey *key);
   CommandResponse AddFieldOne(const bess::pb::Field &field,
                               struct MeteringField *f, uint8_t type);
   gate_idx_t LookupEntry(const MeteringKey &key, gate_idx_t def_gate);
-
+  void DeInit();
  private:
   int DelEntry(MeteringKey *key);
   int GetEntryCount();
@@ -113,7 +117,7 @@ class Qos final : public Module {
   size_t total_value_size_;
   std::vector<struct MeteringField> fields_;
   std::vector<struct MeteringField> values_;
-  Metering<QosData> table_;
+  Metering<value> table_;
   uint64_t mask[MAX_FIELDS];
 };
 

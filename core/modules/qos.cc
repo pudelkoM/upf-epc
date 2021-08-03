@@ -360,15 +360,15 @@ CommandResponse Qos::CommandAdd(const bess::pb::QosCommandAddArg &arg) {
   MeteringKey key = {{0}};
 
   MKey l;
-  struct value v ;
+  struct value v;
   v.ogate = gate;
   CommandResponse err = ExtractKeyMask(arg, &key, &v.Data, &l);
 
   if (err.error().code() != 0) {
     return err;
   }
-  
-  struct QosData *data=(struct QosData*)&v.Data;
+
+  struct QosData *data = (struct QosData *)&v.Data;
   struct rte_meter_srtcm_params app_srtcm_params = {
       .cir = data->cir, .cbs = data->cbs, .ebs = data->ebs};
 
@@ -403,7 +403,7 @@ void Qos::Clear() {
 }
 
 void Qos::DeInit() {
-   table_.DeInit(); 
+  table_.DeInit();
 }
 
 CommandResponse Qos::CommandSetDefaultGate(

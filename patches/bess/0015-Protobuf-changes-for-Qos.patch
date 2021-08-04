@@ -1,4 +1,4 @@
-From 0d3b78ce004769e397b08141a70013d5f27a5f0e Mon Sep 17 00:00:00 2001
+From 09131de13c3b19f6d5119f7d14ee240a18ccd940 Mon Sep 17 00:00:00 2001
 From: Amar Sri <amarsri28@gmail.com>
 Date: Tue, 18 May 2021 08:31:05 -0700
 Subject: [PATCH] Protobuf chnages for Qos
@@ -8,10 +8,10 @@ Subject: [PATCH] Protobuf chnages for Qos
  1 file changed, 30 insertions(+)
 
 diff --git a/protobuf/module_msg.proto b/protobuf/module_msg.proto
-index 1544260f..2c9901d1 100644
+index 25dfc81e..89ffb639 100644
 --- a/protobuf/module_msg.proto
 +++ b/protobuf/module_msg.proto
-@@ -1281,3 +1281,33 @@ message MplsPopArg {
+@@ -1291,3 +1291,33 @@ message MplsPopArg {
  message WorkerSplitArg {
    map<uint32, uint32> worker_gates = 1; // ogate -> worker mask
  }
@@ -22,11 +22,11 @@ index 1544260f..2c9901d1 100644
 +}
 +
 +message QosCommandAddArg {
-+  uint64 gate = 1; 
++  uint64 gate = 1;
 +  repeated FieldData fields = 2;
-+  repeated FieldData values = 3;  
++  repeated FieldData values = 3;
 +}
-+	
++
 +message QosCommandDeleteArg {
 +  repeated FieldData fields = 2;
 +}

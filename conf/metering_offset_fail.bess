@@ -1,0 +1,31 @@
+import socket
+def aton(val):
+    return socket.htonl(val)
+
+Metering::Qos(fields=[{'attr_name':'inport',
+              'num_bytes':4},{'attr_name':'outport', 'num_bytes':4}],
+              values=[{'offset':28, 'num_bytes':1},
+              {'offset':29, 'num_bytes':4},
+              {'offset':33, 'num_bytes':4},
+              {'offset':37, 'num_bytes':4},
+              {'offset':41, 'num_bytes':4},
+              {'offset':45, 'num_bytes':4}, 
+              {'offset':49, 'num_bytes':4}])
+
+Source() -> SetMetadata(attrs=[{'name': 'inport', 'size': 4, 'value_int': (6)}, {'name': 'outport', 'size':4, 'value_int':(5)}]) -> Metering
+
+#Metering:0 -> Sink()
+Metering:0 -> S::Split(size=4, offset=49)
+Metering:1 -> Sink() # used as default gate
+S:0 -> Sink() # If traffic is going to this gate, meta update in QoS is not working
+S:1 -> Sink()
+S:2 -> Sink()
+S:3 -> Sink()
+S:4 -> Sink()
+
+Metering.add(fields=[{'value_int':aton(6)}, {'value_int':aton(5)}],
+             gate=0,values=[{'value_int':3},{'value_int':300000},
+                            {'value_int':500000},{'value_int':2048},
+                            {'value_int':2048},{'value_int':2048},
+                            {'value_int':4}])
+Metering.set_default_gate(gate=1)
